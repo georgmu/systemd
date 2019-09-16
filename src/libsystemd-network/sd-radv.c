@@ -113,6 +113,23 @@ static sd_radv *radv_free(sd_radv *ra) {
         return mfree(ra);
 }
 
+static void radv_remove_invalid_prefixes(sd_radv *ra, usec_t time_now) {
+        assert(ra);
+
+        sd_radv_prefix *cur, *next;
+
+        LIST_FOREACH_SAFE(prefix, cur, next, ra->prefixes) {
+                if (!cur->valid_until)
+                        continue;
+                if (time_now <= cur->valid_until)
+                        continue;
+
+                LIST_REMOVE(prefix, ra->prefixes, cur);
+                ra->n_prefixes--;
+                sd_radv_prefix_unref(cur);
+        }
+}
+
 DEFINE_PUBLIC_TRIVIAL_REF_UNREF_FUNC(sd_radv, sd_radv, radv_free);
 
 static int radv_send(sd_radv *ra, const struct in6_addr *dst, uint32_t router_lifetime) {
@@ -146,6 +163,7 @@ static int radv_send(sd_radv *ra, const struct in6_addr *dst, uint32_t router_li
         };
         usec_t time_now;
         int r;
+        bool has_invalid_routes = false;
 
         assert(ra);
 
@@ -177,9 +195,11 @@ static int radv_send(sd_radv *ra, const struct in6_addr *dst, uint32_t router_li
         LIST_FOREACH(prefix, p, ra->prefixes) {
                 if (p->valid_until) {
 
-                        if (time_now > p->valid_until)
+                        if (time_now > p->valid_until) {
                                 p->opt.valid_lifetime = 0;
-                        else
+                                has_invalid_routes = true;
+                                continue;
+                        } else
                                 p->opt.valid_lifetime = htobe32((p->valid_until - time_now) / USEC_PER_SEC);
 
                         if (time_now > p->preferred_until)
@@ -189,6 +209,9 @@ static int radv_send(sd_radv *ra, const struct in6_addr *dst, uint32_t router_li
                 }
                 iov[msg.msg_iovlen++] = IOVEC_MAKE(&p->opt, sizeof(p->opt));
         }
+
+        if (has_invalid_routes)
+                radv_remove_invalid_prefixes(ra, time_now);
 
         if (ra->rdnss)
                 iov[msg.msg_iovlen++] = IOVEC_MAKE(ra->rdnss, ra->rdnss->length * 8);
